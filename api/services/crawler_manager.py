@@ -118,6 +118,14 @@ class CrawlerManager:
             await self._push_log(entry)
 
             try:
+                # Build environment with Node.js path and EXECJS_RUNTIME
+                env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+                # Ensure Node.js is in PATH for execjs
+                node_path = r"C:\nvm4w\nodejs"
+                if node_path not in env.get("PATH", ""):
+                    env["PATH"] = node_path + os.pathsep + env.get("PATH", "")
+                env["EXECJS_RUNTIME"] = "Node"
+
                 # Start subprocess
                 self.process = subprocess.Popen(
                     cmd,
@@ -127,7 +135,7 @@ class CrawlerManager:
                     encoding='utf-8',
                     bufsize=1,
                     cwd=str(self._project_root),
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"}
+                    env=env
                 )
 
                 self.status = "running"

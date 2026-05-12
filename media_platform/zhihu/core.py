@@ -150,53 +150,187 @@ class ZhihuCrawler(AbstractCrawler):
     async def search(self) -> None:
         """Search for notes and retrieve their comment information."""
         utils.logger.info("[ZhihuCrawler.search] Begin search zhihu keywords")
-        zhihu_limit_count = 20  # zhihu limit page fixed value
+        zhihu_limit_count = 20
         if config.CRAWLER_MAX_NOTES_COUNT < zhihu_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = zhihu_limit_count
         start_page = config.START_PAGE
+        answers_per_question = getattr(config, 'CRAWLER_ZHIHU_ANSWERS_PER_QUESTION', 1)
+        question_count_limit = getattr(config, 'CRAWLER_ZHIHU_QUESTION_COUNT', 0)
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
-            utils.logger.info(
-                f"[ZhihuCrawler.search] Current search keyword: {keyword}"
-            )
+            utils.logger.info(f"[ZhihuCrawler.search] Current search keyword: {keyword}")
             page = 1
-            while (
-                page - start_page + 1
-            ) * zhihu_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
-                if page < start_page:
-                    utils.logger.info(f"[ZhihuCrawler.search] Skip page {page}")
-                    page += 1
-                    continue
-
+            collected_questions: Dict[str, str] = {}
+            search_saved_count = 0
+            while page <= 10:
                 try:
-                    utils.logger.info(
-                        f"[ZhihuCrawler.search] search zhihu keyword: {keyword}, page: {page}"
-                    )
+                    utils.logger.info(f"[ZhihuCrawler.search] 搜索: {keyword}, page: {page}")
                     content_list: List[ZhihuContent] = (
-                        await self.zhihu_client.get_note_by_keyword(
-                            keyword=keyword,
-                            page=page,
-                        )
-                    )
-                    utils.logger.info(
-                        f"[ZhihuCrawler.search] Search contents :{content_list}"
+                        await self.zhihu_client.get_note_by_keyword(keyword=keyword, page=page)
                     )
                     if not content_list:
-                        utils.logger.info("No more content!")
+                        utils.logger.info("没有更多搜索结果!")
                         break
-
-                    # Sleep after page navigation
-                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                    utils.logger.info(f"[ZhihuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
-
-                    page += 1
                     for content in content_list:
-                        await zhihu_store.update_zhihu_content(content)
-
-                    await self.batch_get_content_comments(content_list)
+                        if content.question_id:
+                            if content.question_id not in collected_questions:
+                                collected_questions[content.question_id] = content.title or ""
+                                utils.logger.info(f"[ZhihuCrawler.search] 发现问题 {content.question_id}: {content.title}")
+                            utils.logger.info(f"[ZhihuCrawler.search] 保存搜索结果回答: {content.content_id}")
+                            await zhihu_store.update_zhihu_content(content)
+                            search_saved_count += 1
+                    utils.logger.info(f"[ZhihuCrawler.search] 已收集 {len(collected_questions)} 个问题，已保存 {search_saved_count} 条回答")
+                    if question_count_limit > 0 and len(collected_questions) >= question_count_limit and search_saved_count >= question_count_limit:
+                        utils.logger.info(f"[ZhihuCrawler.search] 已收集够 {question_count_limit} 个问题，停止翻页")
+                        break
+                    page += 1
+                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 except DataFetchError:
-                    utils.logger.error("[ZhihuCrawler.search] Search content error")
-                    return
+                    utils.logger.error("[ZhihuCrawler.search] 搜索失败")
+                    break
+            utils.logger.info(f"[ZhihuCrawler.search] 第一阶段完成: {len(collected_questions)} 个问题, {search_saved_count} 条回答")
+            for idx, (question_id, question_title) in enumerate(collected_questions.items()):
+                if answers_per_question > 1:
+                    utils.logger.info(f"[ZhihuCrawler.search] [{idx+1}/{len(collected_questions)}] 获取问题 {question_id} 的更多回答(目标{answers_per_question}个)...")
+                    all_answers = await self.get_question_all_answers(question_id, answers_per_question)
+                    for answer in all_answers:
+                        if not answer.title and question_title:
+                            answer.title = question_title
+                        await zhihu_store.update_zhihu_content(answer)
+                        if config.ENABLE_GET_COMMENTS:
+                            await self.get_comments(answer, asyncio.Semaphore(1))
+                        await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                else:
+                    utils.logger.info(f"[ZhihuCrawler.search] 单回答模式，跳过额外获取")
+
+    async def get_question_all_answers(self, question_id: str, max_answers: int = 3) -> List[ZhihuContent]:
+        """获取问题的多个回答（极简版 - 只采集内容文本）"""
+        import re
+        def strip_html(text: str) -> str:
+            if not text:
+                return ""
+            text = re.sub(r'<[^>]+>', '', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            return text
+        all_answers: List[ZhihuContent] = []
+        question_url = f"https://www.zhihu.com/question/{question_id}"
+        question_title = ""
+        try:
+            page = await self.browser_context.new_page()
+            # 设置更真实的用户代理和视口
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+            
+            # 先访问知乎首页获取cookie
+            try:
+                await page.goto("https://www.zhihu.com", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(1)
+            except:
+                pass
+            
+            # 再访问问题页面
+            try:
+                await page.goto(question_url, wait_until="networkidle", timeout=30000)
+            except Exception as e:
+                if "TargetClosedError" in str(type(e).__name__) or "TargetClosedError" in str(e):
+                    utils.logger.error(f"[采集] 浏览器已关闭，跳过问题 {question_id}")
+                    await page.close()
+                    return []
+                utils.logger.warning(f"[采集] 页面加载超时，继续尝试: {e}")
+            
+            # 等待页面完全加载
+            await asyncio.sleep(3)
+            
+            # 检查是否有"加载失败"，如果有则刷新
+            for retry in range(3):
+                try:
+                    error_elem = await page.query_selector("text=加载失败了")
+                    if error_elem:
+                        utils.logger.info(f"[采集] 检测到加载失败，第{retry+1}次刷新...")
+                        await page.reload(wait_until="networkidle", timeout=30000)
+                        await asyncio.sleep(3)
+                    else:
+                        break
+                except:
+                    break
+            
+            try:
+                title_elem = await page.query_selector("h1.QuestionHeader-title")
+                if title_elem:
+                    question_title = await title_elem.inner_text()
+                    utils.logger.info(f"[采集] 问题: {question_title}")
+            except:
+                pass
+            
+            # 尝试点击"查看全部回答"或刷新回答列表
+            view_all_selectors = [
+                "button:has-text('查看全部回答')",
+                "button:has-text('查看详情')",
+                "button[class*='Button']:near(h1)",
+                "text=再试试",  # 加载失败后的重试按钮
+            ]
+            for selector in view_all_selectors:
+                try:
+                    btn = await page.query_selector(selector)
+                    if btn:
+                        await btn.click()
+                        utils.logger.info(f"[采集] 点击了: {selector}")
+                        await asyncio.sleep(3)
+                        break
+                except:
+                    continue
+            
+            # 等待回答加载
+            await asyncio.sleep(2)
+            
+            scroll_attempts = 0
+            max_scroll_attempts = 10
+            while len(all_answers) < max_answers and scroll_attempts < max_scroll_attempts:
+                scroll_attempts += 1
+                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await asyncio.sleep(2)
+                
+                # 尝试多种选择器
+                answer_items = await page.query_selector_all(".List-item")
+                if not answer_items:
+                    answer_items = await page.query_selector_all(".ContentItem.AnswerItem")
+                if not answer_items:
+                    answer_items = await page.query_selector_all("[data-zop-question] .ContentItem")
+                if not answer_items:
+                    # 尝试更通用的选择器
+                    answer_items = await page.query_selector_all("div[class*='AnswerItem']")
+                
+                utils.logger.info(f"[采集] 找到 {len(answer_items)} 个回答容器")
+                for item in answer_items:
+                    if len(all_answers) >= max_answers:
+                        break
+                    content_elem = None
+                    for sel in ["[itemprop='text']", "[class*='RichText']", "[class*='ztext']"]:
+                        content_elem = await item.query_selector(sel)
+                        if content_elem:
+                            break
+                    if not content_elem:
+                        continue
+                    content_text = await content_elem.inner_text()
+                    content_text = strip_html(content_text)
+                    if len(content_text) < 50:
+                        continue
+                    content = ZhihuContent()
+                    content.content_id = str(hash(content_text))[:12]
+                    content.question_id = question_id
+                    content.content_type = "answer"
+                    content.content_text = content_text
+                    content.title = question_title
+                    content.content_url = question_url
+                    content.source_keyword = source_keyword_var.get()
+                    content.voteup_count = 0
+                    content.comment_count = 0
+                    all_answers.append(content)
+                    utils.logger.info(f"[采集] 第{len(all_answers)}条: {content_text[:50]}...")
+            await page.close()
+        except Exception as e:
+            utils.logger.error(f"[采集] 异常: {e}")
+        utils.logger.info(f"[采集] 完成，共 {len(all_answers)} 条")
+        return all_answers
 
     async def batch_get_content_comments(self, content_list: List[ZhihuContent]):
         """

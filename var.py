@@ -17,6 +17,34 @@
 # 详细许可条款请参阅项目根目录下的LICENSE文件。
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
+# Windows 兼容性问题修复：注册 QuickJS 作为 execjs 的 JavaScript 运行时
+import os
+os.environ['USERNAME'] = os.environ.get('USERNAME', 'YS')
+
+try:
+    import execjs
+    import execjs._runtimes as _runtimes
+    import quickjs
+
+    class QuickJSRuntime:
+        name = 'QuickJS'
+        
+        def is_available(self):
+            return True
+        
+        def exec_(self, source):
+            ctx = quickjs.Context()
+            return ctx.eval(source)
+        
+        def compile(self, source, cwd=None):
+            ctx = quickjs.Context()
+            ctx.eval(source)
+            return ctx
+
+    _runtimes.register('QuickJS', QuickJSRuntime())
+    execjs.get()  # 初始化默认 runtime
+except ImportError:
+    pass
 
 from asyncio.tasks import Task
 from contextvars import ContextVar

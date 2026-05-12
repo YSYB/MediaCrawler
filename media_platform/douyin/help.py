@@ -26,8 +26,11 @@
 
 import random
 import re
+import os
 from typing import Optional
 
+# 设置execjs使用Node.js
+os.environ['EXECJS_RUNTIME'] = 'Node'
 import execjs
 from playwright.async_api import Page
 

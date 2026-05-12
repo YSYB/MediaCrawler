@@ -575,6 +575,17 @@ class ZhiHuClient(AbstractApiClient, ProxyRefreshMixin):
         response_html = await self.get(uri, return_response=True)
         return self._extractor.extract_answer_content_from_html(response_html)
 
+    async def get_question_answers(self, question_id: str, offset: int = 0, limit: int = 20, sort_by: str = "voteup_count") -> Dict:
+        uri = f"/api/v4/questions/{question_id}/answers"
+        params = {
+            "include":
+            "data[*].is_normal,admin_closed_comment,reward_info,is_collapsed,annotation_action,annotation_detail,collapse_reason,collapsed_by,suggest_edit,comment_count,can_comment,content,editable_content,attachment,voteup_count,reshipment_settings,comment_permission,created_time,updated_time,review_info,excerpt,paid_info,reaction_instruction,is_labeled,label_info,relationship.is_authorized,voting,is_author,is_thanked,is_nothelp",
+            "offset": offset,
+            "limit": limit,
+            "sort_by": sort_by
+        }
+        return await self.get(uri, params)
+
     async def get_article_info(self, article_id: str) -> Optional[ZhihuContent]:
         """
         Get article information

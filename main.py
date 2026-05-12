@@ -36,35 +36,36 @@ import cmd_arg
 import config
 from database import db
 from base.base_crawler import AbstractCrawler
-from media_platform.bilibili import BilibiliCrawler
-from media_platform.douyin import DouYinCrawler
-from media_platform.kuaishou import KuaishouCrawler
-from media_platform.tieba import TieBaCrawler
-from media_platform.weibo import WeiboCrawler
-from media_platform.xhs import XiaoHongShuCrawler
-from media_platform.zhihu import ZhihuCrawler
 from tools.async_file_writer import AsyncFileWriter
 from var import crawler_type_var
 
 
-class CrawlerFactory:
-    CRAWLERS: dict[str, Type[AbstractCrawler]] = {
-        "xhs": XiaoHongShuCrawler,
-        "dy": DouYinCrawler,
-        "ks": KuaishouCrawler,
-        "bili": BilibiliCrawler,
-        "wb": WeiboCrawler,
-        "tieba": TieBaCrawler,
-        "zhihu": ZhihuCrawler,
-    }
-
-    @staticmethod
-    def create_crawler(platform: str) -> AbstractCrawler:
-        crawler_class = CrawlerFactory.CRAWLERS.get(platform)
-        if not crawler_class:
-            supported = ", ".join(sorted(CrawlerFactory.CRAWLERS))
-            raise ValueError(f"Invalid media platform: {platform!r}. Supported: {supported}")
-        return crawler_class()
+def get_crawler_class(platform: str) -> Type[AbstractCrawler]:
+    """动态导入爬虫类，避免加载不需要的平台"""
+    if platform == "zhihu":
+        from media_platform.zhihu import ZhihuCrawler
+        return ZhihuCrawler
+    elif platform == "xhs":
+        from media_platform.xhs import XiaoHongShuCrawler
+        return XiaoHongShuCrawler
+    elif platform == "dy":
+        from media_platform.douyin import DouYinCrawler
+        return DouYinCrawler
+    elif platform == "ks":
+        from media_platform.kuaishou import KuaishouCrawler
+        return KuaishouCrawler
+    elif platform == "bili":
+        from media_platform.bilibili import BilibiliCrawler
+        return BilibiliCrawler
+    elif platform == "wb":
+        from media_platform.weibo import WeiboCrawler
+        return WeiboCrawler
+    elif platform == "tieba":
+        from media_platform.tieba import TieBaCrawler
+        return TieBaCrawler
+    else:
+        supported = ["xhs", "dy", "ks", "bili", "wb", "tieba", "zhihu"]
+        raise ValueError(f"Invalid media platform: {platform!r}. Supported: {', '.join(supported)}")
 
 
 crawler: Optional[AbstractCrawler] = None
@@ -106,7 +107,7 @@ async def main() -> None:
         print(f"Database {args.init_db} initialized successfully.")
         return
 
-    crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
+    crawler = get_crawler_class(platform=config.PLATFORM)()
     await crawler.start()
 
     _flush_excel_if_needed()

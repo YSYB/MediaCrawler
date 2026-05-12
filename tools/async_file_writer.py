@@ -27,21 +27,58 @@ import config
 from tools.utils import utils
 from tools.words import AsyncWordCloudGenerator
 
+
+# 模块级全局缓存，所有 AsyncFileWriter 实例共享同一份文件路径
+_FILE_PATH_GLOBAL_CACHE: Dict[str, str] = {}
+
+
 class AsyncFileWriter:
     def __init__(self, platform: str, crawler_type: str):
         self.lock = asyncio.Lock()
         self.platform = platform
         self.crawler_type = crawler_type
+        self._file_path_cache: Dict[str, str] = {}
         self.wordcloud_generator = AsyncWordCloudGenerator() if config.ENABLE_GET_WORDCLOUD else None
 
     def _get_file_path(self, file_type: str, item_type: str) -> str:
+        cache_key = f"{file_type}_{item_type}"
+        if cache_key in _FILE_PATH_GLOBAL_CACHE:
+            return _FILE_PATH_GLOBAL_CACHE[cache_key]
+
         if config.SAVE_DATA_PATH:
             base_path = f"{config.SAVE_DATA_PATH}/{self.platform}/{file_type}"
         else:
             base_path = f"data/{self.platform}/{file_type}"
         pathlib.Path(base_path).mkdir(parents=True, exist_ok=True)
-        file_name = f"{self.crawler_type}_{item_type}_{utils.get_current_date()}.{file_type}"
-        return f"{base_path}/{file_name}"
+
+        # 拼接文件名，加入所有关键词，用下划线连接；过滤非法文件名字符
+        keyword = ""
+        if hasattr(config, "KEYWORDS") and config.KEYWORDS:
+            raw_kws = [kw.strip() for kw in str(config.KEYWORDS).split(",") if kw.strip()]
+            safe_kws = []
+            for kw in raw_kws:
+                for ch in ["\\", "/", ":", "*", "?", '"', "<", ">", "|"]:
+                    kw = kw.replace(ch, "_")
+                if kw:
+                    safe_kws.append(kw)
+            keyword = f"_{'_'.join(safe_kws)}" if safe_kws else ""
+
+        base_name = f"{self.crawler_type}_{item_type}_{utils.get_current_date()}{keyword}"
+        file_name = f"{base_name}.{file_type}"
+        file_path = f"{base_path}/{file_name}"
+
+        # 如果文件名已存在，加 (1)(2)... 后缀
+        if os.path.exists(file_path):
+            counter = 1
+            while True:
+                file_name = f"{base_name}({counter}).{file_type}"
+                file_path = f"{base_path}/{file_name}"
+                if not os.path.exists(file_path):
+                    break
+                counter += 1
+
+        _FILE_PATH_GLOBAL_CACHE[cache_key] = file_path
+        return file_path
 
     async def write_to_csv(self, item: Dict, item_type: str):
         file_path = self._get_file_path('csv', item_type)
